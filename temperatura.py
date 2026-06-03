@@ -1,12 +1,20 @@
 import streamlit as st
+import serial
 import pandas as pd
-import numpy as np
+from collections import deque
 from datetime import datetime
 import time
 
-# ==========================================
+# =====================================================
+# CONFIGURACIÓN
+# =====================================================
+
+PUERTO = "COM3"      # Cambiar según corresponda
+BAUDIOS = 9600
+
+# =====================================================
 # CONFIGURACIÓN DE LA PÁGINA
-# ==========================================
+# =====================================================
 
 st.set_page_config(
     page_title="Incubadora Neonatal",
@@ -14,33 +22,127 @@ st.set_page_config(
     layout="wide"
 )
 
-# ==========================================
-# ENCABEZADO
-# ==========================================
-
 st.title("🌡️ Sistema de Control Térmico")
 st.subheader("Monitor de Incubadora Neonatal")
 
-st.divider()
+# =====================================================
+# CONEXIÓN SERIAL
+# =====================================================
 
-# ==========================================
-# VARIABLES SIMULADAS
-# ==========================================
+@st.cache_resource
+def conectar_serial():
+    return serial.Serial(
+        port=PUERTO,
+        baudrate=BAUDIOS,
+        timeout=1
+    )
 
-temperatura = 35.8
-setpoint = 36.5
-error = setpoint - temperatura
-u = 65.0
+try:
+    arduino = conectar_serial()
+except Exception as e:
+    st.error(f"No se pudo conectar con Arduino: {e}")
+    st.stop()
 
-# ==========================================
-# TARJETAS PRINCIPALES
-# ==========================================
+# =====================================================
+# VARIABLES DE SESIÓN
+# =====================================================
+
+if "temperaturas" not in st.session_state:
+    st.session_state.temperaturas = deque(maxlen=100)
+
+if "setpoints" not in st.session_state:
+    st.session_state.setpoints = deque(maxlen=100)
+
+if "potencias" not in st.session_state:
+    st.session_state.potencias = deque(maxlen=100)
+
+if "tiempos" not in st.session_state:
+    st.session_state.tiempos = deque(maxlen=100)
+
+# =====================================================
+# SIDEBAR
+# =====================================================
+
+with st.sidebar:
+
+    st.header("Configuración")
+
+    nuevo_setpoint = st.number_input(
+        "Setpoint (°C)",
+        min_value=30.0,
+        max_value=40.0,
+        value=36.5,
+        step=0.1
+    )
+
+    if st.button("Actualizar Setpoint"):
+
+        try:
+
+            comando = f"SP:{nuevo_setpoint}\n"
+
+            arduino.write(comando.encode())
+
+            st.success(
+                f"Setpoint enviado: {nuevo_setpoint:.1f} °C"
+            )
+
+        except Exception as e:
+
+            st.error(f"Error enviando SP: {e}")
+
+# =====================================================
+# LECTURA SERIAL
+# =====================================================
+
+temperatura = 0.0
+setpoint = 0.0
+error = 0.0
+u = 0.0
+
+try:
+
+    if arduino.in_waiting:
+
+        linea = arduino.readline().decode().strip()
+
+        datos = linea.split(",")
+
+        if len(datos) == 4:
+
+            temperatura = float(datos[0])
+            setpoint = float(datos[1])
+            error = float(datos[2])
+            u = float(datos[3])
+
+            st.session_state.temperaturas.append(
+                temperatura
+            )
+
+            st.session_state.setpoints.append(
+                setpoint
+            )
+
+            st.session_state.potencias.append(
+                u
+            )
+
+            st.session_state.tiempos.append(
+                datetime.now()
+            )
+
+except:
+    pass
+
+# =====================================================
+# MÉTRICAS
+# =====================================================
 
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
     st.metric(
-        "Temperatura Actual",
+        "Temperatura",
         f"{temperatura:.2f} °C"
     )
 
@@ -58,13 +160,13 @@ with col3:
 
 with col4:
     st.metric(
-        "Potencia Aplicada",
+        "Potencia",
         f"{u:.1f} %"
     )
 
-# ==========================================
-# ESTADO DEL SISTEMA
-# ==========================================
+# =====================================================
+# ESTADO
+# =====================================================
 
 st.markdown("### Estado del Sistema")
 
@@ -77,57 +179,44 @@ elif error < -0.5:
 else:
     st.success("✅ Temperatura Estable")
 
-st.divider()
+# =====================================================
+# DATAFRAME HISTÓRICO
+# =====================================================
 
-# ==========================================
-# DATOS PARA LAS GRÁFICAS
-# ==========================================
+if len(st.session_state.tiempos) > 0:
 
-n = 60
+    df = pd.DataFrame({
+        "Tiempo": list(st.session_state.tiempos),
+        "Temperatura": list(st.session_state.temperaturas),
+        "Setpoint": list(st.session_state.setpoints),
+        "Potencia": list(st.session_state.potencias)
+    })
 
-tiempo = pd.date_range(
-    end=datetime.now(),
-    periods=n,
-    freq="s"
-)
+    df = df.set_index("Tiempo")
 
-temperatura_hist = np.linspace(34.5, 35.8, n)
-setpoint_hist = np.ones(n) * 36.5
+    col_g1, col_g2 = st.columns(2)
 
-potencia_hist = np.linspace(100, 65, n)
+    with col_g1:
 
-# ==========================================
-# GRÁFICAS
-# ==========================================
+        st.markdown("### Temperatura vs Setpoint")
 
-col_g1, col_g2 = st.columns(2)
+        st.line_chart(
+            df[["Temperatura", "Setpoint"]]
+        )
 
-with col_g1:
+    with col_g2:
 
-    st.markdown("### Temperatura vs Setpoint")
+        st.markdown("### Acción de Control PI")
 
-    df_temp = pd.DataFrame({
-        "Temperatura": temperatura_hist,
-        "Setpoint": setpoint_hist
-    }, index=tiempo)
+        st.line_chart(
+            df[["Potencia"]]
+        )
 
-    st.line_chart(df_temp)
-
-with col_g2:
-
-    st.markdown("### Acción de Control PI")
-
-    df_u = pd.DataFrame({
-        "u[k] (%)": potencia_hist
-    }, index=tiempo)
-
-    st.line_chart(df_u)
-
-st.divider()
-
-# ==========================================
+# =====================================================
 # INFORMACIÓN ADICIONAL
-# ==========================================
+# =====================================================
+
+st.divider()
 
 col5, col6 = st.columns(2)
 
@@ -135,20 +224,22 @@ with col5:
 
     st.markdown("### Parámetros del Controlador")
 
-    st.write("**Kp:** 3.89")
-    st.write("**Ki:** 1.07")
-    st.write("**Periodo de muestreo:** 2 s")
+    st.write("Kp = 3.89")
+    st.write("Ki = 1.07")
+    st.write("Tm = 2 s")
 
 with col6:
 
-    st.markdown("### Información del Sistema")
+    st.markdown("### Hardware")
 
-    st.write("Estado del calefactor: ON")
-    st.write("Sensor: DHT11")
-    st.write("Controlador: PI Discreto")
+    st.write("Arduino UNO")
+    st.write("Sensor DHT11")
+    st.write("Controlador PI")
+    st.write("Calefactor AC")
 
-st.divider()
+# =====================================================
+# AUTOREFRESH
+# =====================================================
 
-st.caption(
-    "Universidad Autónoma de Occidente - Ingeniería Biomédica"
-)
+time.sleep(0.5)
+st.rerun()
